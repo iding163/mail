@@ -33,22 +33,34 @@ export async function initDatabase(db) {
  * @returns {Promise<void>}
  */
 async function performFirstTimeSetup(db) {
-  // 快速检查：如果主表存在，跳过初始化
-  try {
-    await db.prepare('SELECT 1 FROM mailboxes LIMIT 1').all();
-    await db.prepare('SELECT 1 FROM messages LIMIT 1').all();
-    await db.prepare('SELECT 1 FROM users LIMIT 1').all();
-    // 所有表都存在，跳过创建
-    return;
-  } catch (e) {
-    // 表不存在，继续初始化
+  // 快速检查：检查所有核心表是否存在
+  let allTablesExist = true;
+  const requiredTables = ['mailboxes', 'messages', 'users', 'user_mailboxes', 'sent_emails'];
+  
+  for (const tableName of requiredTables) {
+    try {
+      await db.prepare(`SELECT 1 FROM ${tableName} LIMIT 1`).all();
+    } catch (e) {
+      // 表不存在
+      allTablesExist = false;
+      break;
+    }
   }
   
-  // 创建表结构（仅在表不存在时）
+  // 如果所有表都存在，跳过初始化
+  if (allTablesExist) {
+    return;
+  }
+  
+  // 创建核心表结构（仅在表不存在时）
   await db.exec("CREATE TABLE IF NOT EXISTS mailboxes (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT NOT NULL UNIQUE, local_part TEXT NOT NULL, domain TEXT NOT NULL, password_hash TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, last_accessed_at TEXT, expires_at TEXT, is_pinned INTEGER DEFAULT 0, can_login INTEGER DEFAULT 0);");
   await db.exec("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, mailbox_id INTEGER NOT NULL, sender TEXT NOT NULL, to_addrs TEXT NOT NULL DEFAULT '', subject TEXT NOT NULL, verification_code TEXT, preview TEXT, r2_bucket TEXT NOT NULL DEFAULT 'mail-eml', r2_object_key TEXT NOT NULL DEFAULT '', received_at TEXT DEFAULT CURRENT_TIMESTAMP, is_read INTEGER DEFAULT 0, FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id));");
   
-  // 创建索引
+  // 创建用户和发送记录表（必须在索引之前）
+  await ensureUsersTables(db);
+  await ensureSentEmailsTable(db);
+  
+  // 创建所有索引
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_mailboxes_address ON mailboxes(address);`);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_mailboxes_is_pinned ON mailboxes(is_pinned DESC);`);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_mailboxes_address_created ON mailboxes(address, created_at DESC);`);
@@ -57,10 +69,6 @@ async function performFirstTimeSetup(db) {
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_r2_object_key ON messages(r2_object_key);`);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_mailbox_received ON messages(mailbox_id, received_at DESC);`);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_mailbox_received_read ON messages(mailbox_id, received_at DESC, is_read);`);
-  
-  // 创建用户和发送记录表
-  await ensureUsersTables(db);
-  await ensureSentEmailsTable(db);
 }
 
 /**
@@ -267,13 +275,18 @@ export async function checkMailboxOwnership(db, address, userId = null) {
   }
   
   // 检查邮箱是否属于该用户
-  const ownerRes = await db.prepare(
-    'SELECT id FROM user_mailboxes WHERE user_id = ? AND mailbox_id = ? LIMIT 1'
-  ).bind(userId, mailboxId).all();
-  
-  const ownedByUser = ownerRes.results && ownerRes.results.length > 0;
-  
-  return { exists: true, ownedByUser, mailboxId };
+  try {
+    const ownerRes = await db.prepare(
+      'SELECT id FROM user_mailboxes WHERE user_id = ? AND mailbox_id = ? LIMIT 1'
+    ).bind(userId, mailboxId).all();
+    
+    const ownedByUser = ownerRes.results && ownerRes.results.length > 0;
+    
+    return { exists: true, ownedByUser, mailboxId };
+  } catch (error) {
+    // 如果 user_mailboxes 表不存在，返回邮箱存在但不属于用户
+    return { exists: true, ownedByUser: false, mailboxId };
+  }
 }
 
 /**
@@ -298,20 +311,29 @@ export async function toggleMailboxPin(db, address, userId) {
   const mailboxId = mbRes.results[0].id;
 
   // 检查该邮箱是否属于该用户
-  const umRes = await db.prepare('SELECT id, is_pinned FROM user_mailboxes WHERE user_id = ? AND mailbox_id = ? LIMIT 1')
-    .bind(uid, mailboxId).all();
-  if (!umRes.results || umRes.results.length === 0){
-    // 若尚未存在关联记录（例如严格管理员未分配该邮箱），则创建一条仅用于个人置顶的关联
+  try {
+    const umRes = await db.prepare('SELECT id, is_pinned FROM user_mailboxes WHERE user_id = ? AND mailbox_id = ? LIMIT 1')
+      .bind(uid, mailboxId).all();
+    if (!umRes.results || umRes.results.length === 0){
+      // 若尚未存在关联记录（例如严格管理员未分配该邮箱），则创建一条仅用于个人置顶的关联
+      await db.prepare('INSERT INTO user_mailboxes (user_id, mailbox_id, is_pinned) VALUES (?, ?, 1)')
+        .bind(uid, mailboxId).run();
+      return { is_pinned: 1 };
+    }
+
+    const currentPin = umRes.results[0].is_pinned ? 1 : 0;
+    const newPin = currentPin ? 0 : 1;
+    await db.prepare('UPDATE user_mailboxes SET is_pinned = ? WHERE user_id = ? AND mailbox_id = ?')
+      .bind(newPin, uid, mailboxId).run();
+    return { is_pinned: newPin };
+  } catch (error) {
+    // 如果 user_mailboxes 表不存在，先确保表存在
+    await ensureUsersTables(db);
+    // 创建关联记录并置顶
     await db.prepare('INSERT INTO user_mailboxes (user_id, mailbox_id, is_pinned) VALUES (?, ?, 1)')
       .bind(uid, mailboxId).run();
     return { is_pinned: 1 };
   }
-
-  const currentPin = umRes.results[0].is_pinned ? 1 : 0;
-  const newPin = currentPin ? 0 : 1;
-  await db.prepare('UPDATE user_mailboxes SET is_pinned = ? WHERE user_id = ? AND mailbox_id = ?')
-    .bind(newPin, uid, mailboxId).run();
-  return { is_pinned: newPin };
 }
 
 /**

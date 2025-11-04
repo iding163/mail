@@ -136,20 +136,25 @@ export async function getCachedUserQuota(db, userId) {
   }
   
   // 查询数据库
-  const ures = await db.prepare('SELECT mailbox_limit FROM users WHERE id = ?').bind(userId).all();
-  const limit = ures?.results?.[0]?.mailbox_limit ?? 10;
-  const cres = await db.prepare('SELECT COUNT(1) AS c FROM user_mailboxes WHERE user_id = ?').bind(userId).all();
-  const used = cres?.results?.[0]?.c || 0;
-  
-  const data = { used, limit };
-  
-  // 更新缓存
-  CACHE.userQuotas.set(userId, {
-    data,
-    timestamp: Date.now()
-  });
-  
-  return data;
+  try {
+    const ures = await db.prepare('SELECT mailbox_limit FROM users WHERE id = ?').bind(userId).all();
+    const limit = ures?.results?.[0]?.mailbox_limit ?? 10;
+    const cres = await db.prepare('SELECT COUNT(1) AS c FROM user_mailboxes WHERE user_id = ?').bind(userId).all();
+    const used = cres?.results?.[0]?.c || 0;
+    
+    const data = { used, limit };
+    
+    // 更新缓存
+    CACHE.userQuotas.set(userId, {
+      data,
+      timestamp: Date.now()
+    });
+    
+    return data;
+  } catch (error) {
+    // 如果表不存在，返回默认配额
+    return { used: 0, limit: 10 };
+  }
 }
 
 /**
