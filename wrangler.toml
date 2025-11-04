@@ -3,11 +3,10 @@ name = "mailfree"
 main = "src/server.js"
 compatibility_date = "2024-01-01"
 
-# D1 数据库绑定
 [[d1_databases]]
 binding = "TEMP_MAIL_DB"
-database_name = "maill_free_db" #你的d1数据库名称
-database_id = "c82663ac-62b6-4ba6-be81-cbe297f2a3dd" # 你的database_id
+database_name = "xzcxz" #你的d1数据库名称
+database_id = "fcfc725c-2a65-4e4c-a320-4581d4d0dd59" # 你的database_id
 
 # 环境变量
 [vars]
