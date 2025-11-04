@@ -747,7 +747,7 @@ export async function handleApiRequest(request, db, mailDomains, options = { moc
         
         // 构建筛选条件
         let whereConditions = [];
-        let bindParams = [];
+        let bindParams = [adminUid || 0];
         
         // 搜索条件
         if (q) {
@@ -771,83 +771,61 @@ export async function handleApiRequest(request, db, mailDomains, options = { moc
         const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
         bindParams.push(limit, offset);
         
-        // 尝试使用 LEFT JOIN 查询（包含用户置顶状态）
-        try {
-          const { results } = await db.prepare(`
-            SELECT m.address, m.created_at, COALESCE(um.is_pinned, 0) AS is_pinned,
-                   CASE WHEN (m.password_hash IS NULL OR m.password_hash = '') THEN 1 ELSE 0 END AS password_is_default,
-                   COALESCE(m.can_login, 0) AS can_login
-            FROM mailboxes m
-            LEFT JOIN user_mailboxes um ON um.mailbox_id = m.id AND um.user_id = ?
-            ${whereClause}
-            ORDER BY is_pinned DESC, m.created_at DESC
-            LIMIT ? OFFSET ?
-          `).bind(adminUid || 0, ...bindParams).all();
-          return Response.json(results || []);
-        } catch (joinError) {
-          // 如果 user_mailboxes 表不存在，回退到简单查询
-          const { results } = await db.prepare(`
-            SELECT m.address, m.created_at, 0 AS is_pinned,
-                   CASE WHEN (m.password_hash IS NULL OR m.password_hash = '') THEN 1 ELSE 0 END AS password_is_default,
-                   COALESCE(m.can_login, 0) AS can_login
-            FROM mailboxes m
-            ${whereClause}
-            ORDER BY m.created_at DESC
-            LIMIT ? OFFSET ?
-          `).bind(...bindParams).all();
-          return Response.json(results || []);
-        }
+        const { results } = await db.prepare(`
+          SELECT m.address, m.created_at, COALESCE(um.is_pinned, 0) AS is_pinned,
+                 CASE WHEN (m.password_hash IS NULL OR m.password_hash = '') THEN 1 ELSE 0 END AS password_is_default,
+                 COALESCE(m.can_login, 0) AS can_login
+          FROM mailboxes m
+          LEFT JOIN user_mailboxes um ON um.mailbox_id = m.id AND um.user_id = ?
+          ${whereClause}
+          ORDER BY is_pinned DESC, m.created_at DESC
+          LIMIT ? OFFSET ?
+        `).bind(...bindParams).all();
+        return Response.json(results || []);
       }
       const payload = getJwtPayload();
       const uid = Number(payload?.userId || 0);
       if (!uid) return Response.json([]);
       const like = `%${q.replace(/%/g,'').replace(/_/g,'')}%`;
       
-      // 尝试查询用户分配的邮箱（需要 user_mailboxes 表）
-      try {
-        // 构建筛选条件
-        let whereConditions = ['um.user_id = ?'];
-        let bindParams = [uid];
-        
-        // 搜索条件
-        if (q) {
-          whereConditions.push('LOWER(m.address) LIKE LOWER(?)');
-          bindParams.push(like);
-        }
-        
-        // 域名筛选
-        if (domain) {
-          whereConditions.push('LOWER(m.address) LIKE LOWER(?)');
-          bindParams.push(`%@${domain}`);
-        }
-        
-        // 登录权限筛选
-        if (canLoginParam === 'true') {
-          whereConditions.push('m.can_login = 1');
-        } else if (canLoginParam === 'false') {
-          whereConditions.push('m.can_login = 0');
-        }
-        
-        const whereClause = 'WHERE ' + whereConditions.join(' AND ');
-        bindParams.push(limit, offset);
-        
-        const { results } = await db.prepare(`
-          SELECT m.address, m.created_at, um.is_pinned,
-                 CASE WHEN (m.password_hash IS NULL OR m.password_hash = '') THEN 1 ELSE 0 END AS password_is_default,
-                 COALESCE(m.can_login, 0) AS can_login
-          FROM user_mailboxes um
-          JOIN mailboxes m ON m.id = um.mailbox_id
-          ${whereClause}
-          ORDER BY um.is_pinned DESC, m.created_at DESC
-          LIMIT ? OFFSET ?
-        `).bind(...bindParams).all();
-        return Response.json(results || []);
-      } catch (userMailboxError) {
-        // 如果 user_mailboxes 表不存在，返回空数组（普通用户必须有分配记录）
-        return Response.json([]);
+      // 构建筛选条件
+      let whereConditions = ['um.user_id = ?'];
+      let bindParams = [uid];
+      
+      // 搜索条件
+      if (q) {
+        whereConditions.push('LOWER(m.address) LIKE LOWER(?)');
+        bindParams.push(like);
       }
-    }catch(outerError){
-      console.error('查询邮箱列表失败:', outerError);
+      
+      // 域名筛选
+      if (domain) {
+        whereConditions.push('LOWER(m.address) LIKE LOWER(?)');
+        bindParams.push(`%@${domain}`);
+      }
+      
+      // 登录权限筛选
+      if (canLoginParam === 'true') {
+        whereConditions.push('m.can_login = 1');
+      } else if (canLoginParam === 'false') {
+        whereConditions.push('m.can_login = 0');
+      }
+      
+      const whereClause = 'WHERE ' + whereConditions.join(' AND ');
+      bindParams.push(limit, offset);
+      
+      const { results } = await db.prepare(`
+        SELECT m.address, m.created_at, um.is_pinned,
+               CASE WHEN (m.password_hash IS NULL OR m.password_hash = '') THEN 1 ELSE 0 END AS password_is_default,
+               COALESCE(m.can_login, 0) AS can_login
+        FROM user_mailboxes um
+        JOIN mailboxes m ON m.id = um.mailbox_id
+        ${whereClause}
+        ORDER BY um.is_pinned DESC, m.created_at DESC
+        LIMIT ? OFFSET ?
+      `).bind(...bindParams).all();
+      return Response.json(results || []);
+    }catch(_){
       return Response.json([]);
     }
   }
